@@ -17,6 +17,8 @@ import anyio.to_thread
 from pydantic_core import to_json
 from typing_extensions import ParamSpec, TypedDict, assert_never
 
+from .._utils import is_str_dict
+
 try:
     from botocore.client import BaseClient
     from botocore.exceptions import BotoCoreError, ClientError
@@ -120,6 +122,8 @@ if TYPE_CHECKING:
         ToolTypeDef,
         ToolUseBlockOutputTypeDef,
     )
+
+_ANTHROPIC_SAMPLING_PARAMS = ('temperature', 'top_p', 'top_k')
 
 
 @contextmanager
@@ -701,7 +705,43 @@ class BedrockConverseModel(Model[BaseClient]):
                 model_request_parameters, output_object=replace(model_request_parameters.output_object, strict=True)
             )
         # Pass unmerged model_settings; base class does its own merge
-        return super().prepare_request(model_settings, model_request_parameters)
+        prepared_settings, model_request_parameters = super().prepare_request(model_settings, model_request_parameters)
+        # Bedrock Converse API rejects sampling parameters on specific Anthropic models (e.g. Claude Opus 5).
+        # Strip them post-merge and emit a warning to match the direct Anthropic adapter behavior
+        if self.profile.get('anthropic_disallows_sampling_settings', False) and prepared_settings:
+            filtered: ModelSettings = {**prepared_settings}
+            self._drop_unsupported_sampling_settings(filtered)
+            prepared_settings = filtered or None
+        return prepared_settings, model_request_parameters
+
+    def _drop_unsupported_sampling_settings(self, model_settings: ModelSettings) -> None:
+        """Drop sampling settings disallowed by the active model and warn the caller.
+
+        Frontier Anthropic models on Bedrock (such as Claude Opus 5) disallow sampling parameters
+        (`temperature`, `top_p`, `top_k`) and reject requests containing them with a 400
+        `ValidationException`.
+
+        Mirrors `AnthropicModel._drop_unsupported_sampling_settings` by stripping these settings
+        from both unified `model_settings` and `extra_body` before request serialization.
+        """
+        dropped = {setting for setting in _ANTHROPIC_SAMPLING_PARAMS if setting in model_settings}
+        extra_body = model_settings.get('extra_body')
+        if is_str_dict(extra_body):
+            dropped |= {setting for setting in _ANTHROPIC_SAMPLING_PARAMS if setting in extra_body}
+            model_settings['extra_body'] = {
+                key: value for key, value in extra_body.items() if key not in _ANTHROPIC_SAMPLING_PARAMS
+            }
+
+        for setting in _ANTHROPIC_SAMPLING_PARAMS:
+            model_settings.pop(setting, None)
+
+        if dropped:
+            ordered = [setting for setting in _ANTHROPIC_SAMPLING_PARAMS if setting in dropped]
+            warnings.warn(
+                f'Sampling parameters {ordered} are not supported by {self.model_name!r}. These settings will be ignored.',
+                UserWarning,
+                stacklevel=2,
+            )
 
     @property
     def _botocore_supports_strict_tool_param(self) -> bool:

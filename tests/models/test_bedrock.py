@@ -6854,3 +6854,34 @@ async def test_bedrock_anthropic_message_history_starting_with_response(
             ),
         ]
     )
+
+
+async def test_bedrock_disallows_sampling_settings_warning():
+    # Claude Opus 5 has anthropic_disallows_sampling_settings=True
+    model = BedrockConverseModel(
+        'eu.anthropic.claude-opus-5-20260205-v1:0',
+        provider=BedrockProvider(aws_access_key_id='probe', aws_secret_access_key='probe', region_name='eu-west-1'),
+    )
+
+    with pytest.warns(UserWarning, match=r"Sampling parameters \['temperature', 'top_p', 'top_k'\] are not supported"):
+        settings, _ = model.prepare_request(
+            {'temperature': 0.7, 'top_p': 0.9, 'top_k': 40, 'max_tokens': 100},
+            ModelRequestParameters(),
+        )
+
+    assert settings == {'max_tokens': 100}
+
+
+async def test_bedrock_allows_sampling_settings_when_flag_not_set():
+    # Claude Haiku does not disallow sampling settings
+    model = BedrockConverseModel(
+        'anthropic.claude-3-5-haiku-20241022-v1:0',
+        provider=BedrockProvider(aws_access_key_id='probe', aws_secret_access_key='probe', region_name='us-east-1'),
+    )
+
+    settings, _ = model.prepare_request(
+        {'temperature': 0.7, 'top_p': 0.9, 'max_tokens': 100},
+        ModelRequestParameters(),
+    )
+
+    assert settings == {'temperature': 0.7, 'top_p': 0.9, 'max_tokens': 100}
